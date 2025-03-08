@@ -2,6 +2,7 @@ import os
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+from scipy.signal import savgol_filter
 from catboost import CatBoostClassifier, CatBoostRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import mean_absolute_error, r2_score, classification_report, precision_recall_curve
@@ -11,6 +12,7 @@ warnings.filterwarnings('ignore')
 
 # Загрузка данных
 general_markup = pd.read_csv('markup_train.csv')
+high_quality = pd.read_csv('hq_markup_train.csv')
 data_directory = 'data/'
 
 # Создаем директорию для сохранения моделей
@@ -62,9 +64,9 @@ def preprocess(dataframe):
     return filtered_dataframe
 
 def find_best_threshold(y_true, y_probs):
-    """Находит лучший порог по Precision Recall кривой на основе максимизации F1."""
+    """Находит лучший порог по Precision Recall кривой на основе максимизации F1"""
     precision, recall, thresholds = precision_recall_curve(y_true, y_probs)
-    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-9)  # Избегаем деления на ноль
+    f1_scores = 2 * (precision * recall) / (precision + recall + 1e-12)  # Избегаем деления на ноль
     best_index = np.argmax(f1_scores)
     return thresholds[best_index], f1_scores[best_index]
 
@@ -88,7 +90,7 @@ def adjust_predictions(y_prob, threshold, X_test, y_reg_test, reg=None, reg_idx=
     return pred
 
 def extract_features(file_name, data_folder="data", segments=5):
-    """Извлекает признаки из файла с данными ГДИС."""
+    """Извлекает признаки из файла с данными ГДИС"""
     file_path = os.path.join(data_folder, file_name)
     if not os.path.exists(file_path):
         return None
@@ -127,7 +129,7 @@ def extract_features(file_name, data_folder="data", segments=5):
     if np.isclose(log_time.min(), log_time.max()):
         return None
 
-    bounds = np.linspace(log_time.min(), log_time.max(), segments + 1) # TO-DO: Число сегментов равно число 0.5 лог-циклов
+    bounds = np.linspace(log_time.min(), log_time.max(), segments + 1)
     for i in range(segments):
         segment_mask = (log_time >= bounds[i]) & (log_time < bounds[i+1])
         seg_lt = log_time[segment_mask]
@@ -152,14 +154,30 @@ def extract_features(file_name, data_folder="data", segments=5):
             f"seg_{i}_dp_slope": float(dp_slope),
             f"seg_{i}_dp_intercept": float(dp_intercept),
             f"seg_{i}_dr_slope": float(dr_slope),
-            f"seg_{i}_dr_intercept": float(dr_intercept)
+            f"seg_{i}_dr_intercept": float(dr_intercept),
+            f"seg_{i}_time_std": np.std(np.diff(seg_lt))
+        })
+
+    # Фичи для последних бинарных признаков
+    smooth_derivative = savgol_filter(np.log10(derivative), window_length=5, polyorder=3)
+    
+    n = len(time)
+    last_5_percent_idx = int(n * 0.95)
+    time_last_5 = log_time[last_5_percent_idx:]
+    derivative_last_5 = smooth_derivative[last_5_percent_idx:]
+    coeff = np.polyfit(time_last_5, derivative_last_5, 1)
+    a, b = coeff
+    features.update({
+            "sm_slope": float(a), # наклон
+            "last_changes": np.std(np.diff(derivative_last_5)) # вариативность производной в последние моменты времени
         })
 
     return features
 
 
 if __name__ == '__main__':
-    general_markup = preprocess(general_markup)
+    general_markup = pd.concat([general_markup, high_quality], axis=0)
+    #general_markup = preprocess(general_markup)
 
     features_list, binary_labels_list, regression_values_list, filenames = [], [], [], []
     for _, row in tqdm(general_markup.iterrows(), total=len(general_markup)):
@@ -179,29 +197,36 @@ if __name__ == '__main__':
     Y_reg = np.array(regression_values_list) # # Shape: (N, 7)
 
     X_train, X_test, y_bin_train, y_bin_test, y_reg_train, y_reg_test = train_test_split(
-        X, Y_bin, Y_reg, test_size=0.2, random_state=42
+        X, Y_bin, Y_reg, test_size=0.1, random_state=42
     )
 
     # Обучение классификаторов
     classifiers = {}
     y_test_dict = {}
     for idx, target in enumerate(binary_target_columns):
+        X_train_bin = X_train.copy()
         y_train = y_bin_train[:, idx]
         y_test_dict[target] = y_bin_test[:, idx] # Сохраняем истинные значения для теста
-        class_weights = [1.0, (y_train == 0).sum() / (y_train == 1).sum()] if (y_train == 1).any() else None
+        weight = (y_train == 0).sum() / (y_train == 1).sum() if (y_train == 1).any() else 1
+        
 
-        if class_weights is None:
+        if weight is None:
             print('Все значения y_train равны нулю! Пропуск объекта.')
             continue
 
         clf = CatBoostClassifier(
+            n_estimators=2000,
             depth=6,
+            learning_rate=0.1,
             loss_function='Logloss',
             verbose=False,
-            class_weights=class_weights
+            scale_pos_weight=weight,
+            early_stopping_rounds=100
         )
-        clf.fit(X_train, y_train)
+        clf.fit(X_train_bin, y_train)
         classifiers[target] = clf
+        
+        X_train_bin[target] = y_train # Teacher Learning
 
     # Обучение регрессоров
     regressors = {}
@@ -216,9 +241,11 @@ if __name__ == '__main__':
             continue
 
         reg = CatBoostRegressor(
+            n_estimators=2000,
             depth=6,
             loss_function='RMSE',
-            verbose=False
+            verbose=False,
+            early_stopping_rounds=100
         )
         reg.fit(X_reg_train, y_reg_train_subset)
         regressors[reg_target] = reg
@@ -271,3 +298,5 @@ if __name__ == '__main__':
         model_path = os.path.join(models_directory, f'regressor_{reg_target}.cbm')
         reg.save_model(model_path)
         print(f"Сохранен регрессор для '{reg_target}' в {model_path}")
+    
+    pd.Series(thresholds, index=thresholds.keys()).to_csv('thr.csv')
