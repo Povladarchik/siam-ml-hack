@@ -47,10 +47,15 @@ if __name__ == '__main__':
     pred_bin = np.zeros((len(X_valid), len(classifiers)), dtype=int)
     pred_reg = np.full((len(X_valid), len(regressors)), np.nan)
 
+    X_valid_bin = X_valid.copy()
+    thresholds = pd.read_csv('thr.csv').to_dict()
+
     # Генерация бинарных предсказаний
     for idx, (target, clf) in enumerate(classifiers.items()):
-        probabilities = clf.predict_proba(X_valid)[:, 1]
-        pred_bin[:, idx] = (probabilities > 0.5).astype(int)  # Порог 0.5 по умолчанию
+        probabilities = clf.predict_proba(X_valid_bin)[:, 1]
+        thr = thresholds.get(label_name, 0.5) # Порог 0.5 по умолчанию
+        pred_bin[:, idx] = (probabilities > thr).astype(int)
+        X_valid_bin[target] = pred_bin[:, idx]
 
     # Генерация регрессионных предсказаний
     for reg_target, reg in regressors.items():
