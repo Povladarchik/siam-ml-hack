@@ -59,8 +59,32 @@ def preprocess(dataframe):
         (dataframe['Некачественное ГДИС'] == 1) &
         (dataframe[binary_target_columns[1:]].sum(axis=1) == 0)
     )
-    filtered_dataframe = dataframe[~filter_mask].reset_index(drop=True)
-    print(f"Оставшиеся строки после фильтрации: {len(filtered_dataframe)}")
+    #filtered_dataframe = dataframe[~filter_mask].reset_index(drop=True)
+    #print(f"Оставшиеся строки после фильтрации: {len(filtered_dataframe)}")
+    filtered_dataframe = dataframe
+    # Удаление случаев фичи с границей равны 1
+    pc = ['54ef4d1c-6d16-424e-a016-ec75b1e56879', '1452a12f-a688-41c9-819e-e403513184cb', '91a06e11-9025-4ba5-9d8c-626f58ace660', 
+      'e41ac5a8-d205-4fec-8785-31f07421bc03', 'dc110bf1-580b-4047-a1a1-faa4eca926fb', '00b5f6f3-1ea9-4ea6-a46f-0d03e8e2f61a',
+      '7a1a885f-3e2a-4bf5-a8bf-9bc172843460', 'd279db2c-81f7-4505-8125-b46485fc555b', '010beb0f-732c-446c-8b0a-66740b7535a3',
+      '0a86bd9f-1381-4f1a-8d36-47ac957f4bca', '714257c6-d126-476d-a505-8072406993ab', '2dcb5397-d0ef-475e-b97e-61b3d512713f',
+      '5ef75a9b-79cc-4615-816e-aaa155f0a189', '70f6ec88-722c-49b4-bc83-795afeea62ac', '0ece8930-f333-41a5-a7e1-2ac0a0415d8e']
+
+    ib = ['00b09629-a21a-41d1-ba64-cf3de2f08ce8', '10eba4d3-29a0-4738-8455-8d91b19ff85b',
+        'd50eff5a-8186-45e0-8677-33711f54d7fa', 'f89ad09d-32df-455f-864d-1b4618253284', '289ed2b6-eb83-4725-aeca-5afe74322963',
+        '75a9dd64-1d4c-4ae1-823b-a2a21664b08c', '605d3438-3a03-46d4-b710-ac4f05ceecaa', '679f5b15-add7-4609-aa80-370a8d2fa3b6',
+        '5e759d98-72cf-48a3-aeac-b4249a291f82', '7caa5d56-8795-46e2-958f-2b2d0f5289ad', 'eb5260f4-f0e4-4c65-846d-52b016fecfec']
+
+    to_drop = ['8a24e5f0-913a-4a2a-ad18-d5205dd07c97', 'b798ecf0-9f17-4c2e-bb3e-3258ef3eb67d', '9c22387b-29db-4698-8c57-267c29461901',
+           '2afa9faf-5022-4df9-bbe9-b6fe35e23b4f', '54d868ff-a682-48f1-85ff-b09af171b0bd',  '22e2deb1-3e2d-4c82-b5ea-4c961bf0b9a3']
+        
+    const_bound = filtered_dataframe[filtered_dataframe['file_name'].isin(pc)].index
+    imper_bound = filtered_dataframe[filtered_dataframe['file_name'].isin(ib)].index
+    to_drop_mask = filtered_dataframe['file_name'].isin(to_drop)
+
+    filtered_dataframe.loc[const_bound, ['Граница непроницаемый разлом', 'Граница непроницаемый разлом_details']] = 0, np.nan
+    filtered_dataframe.loc[imper_bound, ['Граница постоянного давления', 'Граница постоянного давления_details']] = 0, np.nan
+    filtered_dataframe = filtered_dataframe[~to_drop_mask]
+
     return filtered_dataframe
 
 def find_best_threshold(y_true, y_probs):
@@ -168,8 +192,9 @@ def extract_features(file_name, data_folder="data", segments=5):
     coeff = np.polyfit(time_last_5, derivative_last_5, 1)
     a, b = coeff
     features.update({
-            "sm_slope": float(a), # наклон
-            "last_changes": np.std(np.diff(derivative_last_5)) # вариативность производной в последние моменты времени
+            "sm_slope": float(a),
+            "sm_slope": float(b),
+            "last_changes": np.std(np.diff(derivative_last_5)) # Вариативность производной в последние моменты времени
         })
 
     return features
@@ -197,73 +222,70 @@ if __name__ == '__main__':
     Y_reg = np.array(regression_values_list) # # Shape: (N, 7)
 
     X_train, X_test, y_bin_train, y_bin_test, y_reg_train, y_reg_test = train_test_split(
-        X, Y_bin, Y_reg, test_size=0.1, random_state=42
+        X, Y_bin, Y_reg, test_size=0.05, random_state=42
     )
 
     # Обучение классификаторов
     classifiers = {}
     y_test_dict = {}
+    X_train_bin = X_train.copy()
+    X_test_bin = X_test.copy()
     for idx, target in enumerate(binary_target_columns):
-        X_train_bin = X_train.copy()
         y_train = y_bin_train[:, idx]
         y_test_dict[target] = y_bin_test[:, idx] # Сохраняем истинные значения для теста
         weight = (y_train == 0).sum() / (y_train == 1).sum() if (y_train == 1).any() else 1
-        
 
         if weight is None:
             print('Все значения y_train равны нулю! Пропуск объекта.')
             continue
 
         clf = CatBoostClassifier(
-            n_estimators=2000,
-            depth=6,
-            learning_rate=0.1,
+            n_estimators=2500,
+            depth=8,
             loss_function='Logloss',
             verbose=False,
-            scale_pos_weight=weight,
-            early_stopping_rounds=100
+            scale_pos_weight=weight
         )
         clf.fit(X_train_bin, y_train)
         classifiers[target] = clf
         
-        X_train_bin[target] = y_train # Teacher Learning
+        X_train_bin[target] = y_train # Teacher Learning (важно!)
+        X_test_bin[target] = y_test_dict[target] # Сохраняем для подбора порогов
 
     # Обучение регрессоров
     regressors = {}
     for bin_idx, reg_idx in bin_to_reg_mapping.items():
         target_name = binary_target_columns[bin_idx]
         reg_target = regression_target_columns[reg_idx]
-        train_mask = (y_bin_train[:, bin_idx] == 1)
-        X_reg_train = X_train[train_mask]
+        train_mask = (y_bin_train[:, bin_idx] == 1) # Только при наличии признака
+        X_reg_train = X_train_bin[train_mask] # Уже содержит бинарные признаки с true labels
         y_reg_train_subset = y_reg_train[train_mask, reg_idx]
         
         if len(X_reg_train) < 5:
             continue
 
         reg = CatBoostRegressor(
-            n_estimators=2000,
+            n_estimators=2500,
             depth=6,
             loss_function='RMSE',
-            verbose=False,
-            early_stopping_rounds=100
+            verbose=False
         )
         reg.fit(X_reg_train, y_reg_train_subset)
         regressors[reg_target] = reg
 
-    # Оценка регрессоров на тестовой выборке
-    test_mask = (y_bin_test[:, bin_idx] == 1)
-    X_reg_test = X_test[test_mask]
-    y_reg_test_subset = y_reg_test[test_mask, reg_idx]
-    if len(X_reg_test) > 0:
-        yhat_reg = reg.predict(X_reg_test)
-        mae_test = mean_absolute_error(y_reg_test_subset, yhat_reg)
-        r2_test  = r2_score(y_reg_test_subset, yhat_reg)
-        print(f"Значения метрик на тесте для регресии {reg_target}, MAE={mae_test:.3f}, R2={r2_test:.3f}, Count={len(X_reg_test)}")
+        # Оценка регрессоров на тестовой выборке
+        test_mask = (y_bin_test[:, bin_idx] == 1)
+        X_reg_test = X_test_bin[test_mask]
+        y_reg_test_subset = y_reg_test[test_mask, reg_idx]
+        if len(X_reg_test) > 0:
+            yhat_reg = reg.predict(X_reg_test)
+            mae_test = mean_absolute_error(y_reg_test_subset, yhat_reg)
+            r2_test  = r2_score(y_reg_test_subset, yhat_reg)
+            print(f"Значения метрик на тесте для регресии {reg_target}, MAE={mae_test:.3f}, R2={r2_test:.3f}, Count={len(X_reg_test)}")
     
     # Для каждого классификатора подбираем порог, максимизирующий F1 с учётом условия по MAE.
     thresholds = {}
     f1_scores_all = {}
-
     for label_name, clf in classifiers.items():
         y_ts = y_test_dict[label_name]
         y_prob_test = clf.predict_proba(X_test)[:, 1]
@@ -279,9 +301,12 @@ if __name__ == '__main__':
         
         print(f"\n=== Признак '{label_name}' ===")
         print(f"Оптимальный порог: {best_thr:.2f}, F1: {best_f1:.3f}")
-        final_pred = adjust_predictions(y_prob_test, best_thr, X_test, y_reg_test, reg, reg_idx)
+        final_pred = adjust_predictions(y_prob_test, best_thr, X_test_bin, y_reg_test, reg, reg_idx)
         print(classification_report(y_ts, final_pred, zero_division=0))
         print("-" * 50)
+
+        y_temp = pd.DataFrame(y_bin_test, columns=binary_target_columns)
+        X_test[label_name] = y_temp[label_name] # Сохраняем последовательность в Teacher Learning
 
     if f1_scores_all:
         mean_f1 = np.mean(list(f1_scores_all.values()))
@@ -299,4 +324,5 @@ if __name__ == '__main__':
         reg.save_model(model_path)
         print(f"Сохранен регрессор для '{reg_target}' в {model_path}")
     
+    # Сохраняем лучшие пороги
     pd.Series(thresholds, index=thresholds.keys()).to_csv('thr.csv')

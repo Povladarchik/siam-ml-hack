@@ -62,7 +62,7 @@ if __name__ == '__main__':
         reg_idx = list(regressors.keys()).index(reg_target)
         bin_idx = [k for k, v in bin_to_reg_mapping.items() if v == reg_idx][0]
         mask = (pred_bin[:, bin_idx] == 1)
-        X_subset = X_valid[mask]
+        X_subset = X_valid_bin[mask]
         if len(X_subset) > 0:
             pred_reg[mask, reg_idx] = reg.predict(X_subset)
 
